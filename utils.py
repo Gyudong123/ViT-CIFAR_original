@@ -110,7 +110,8 @@ def get_dataset(args):
     return train_ds, test_ds
 
 def get_experiment_name(args):
-    experiment_name = f"Gy_{args.model_name}_{args.lr}_{args.batch_size}_{args.weight_decay}_{args.head}_original"
+    # python main.py --head $head --num-layers $num_layer --hidden $hidden --mlp-hidden $mlp_hidden --batch-size $batch_size --lr $lr  &
+    experiment_name = f"Gy_{args.head}_{args.num_layers}_{args.hidden}_{args.mlp_hidden}_{args.batch_size}_{args.lr}_original"
     if args.autoaugment:
         experiment_name+="_aa"
     if args.label_smoothing:
