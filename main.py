@@ -28,7 +28,7 @@ parser.add_argument("--off-benchmark", action="store_true")
 parser.add_argument("--max-epochs", default=200, type=int)
 parser.add_argument("--dry-run", action="store_true")
 parser.add_argument("--weight-decay", default=1e-4, type=float)
-parser.add_argument("--warmup-epoch", default=5, type=int)
+parser.add_argument("--warmup-epoch", default=10, type=int)
 parser.add_argument("--precision", default=16, type=int)
 parser.add_argument("--autoaugment",default=True, action="store_true")
 parser.add_argument("--criterion", default="ce")
@@ -37,7 +37,7 @@ parser.add_argument("--smoothing", default=0.1, type=float)
 parser.add_argument("--rcpaste", action="store_true")
 parser.add_argument("--cutmix", action="store_true")
 parser.add_argument("--mixup", action="store_true")
-parser.add_argument("--dropout", default=0, type=float)
+parser.add_argument("--dropout", default=0.1, type=float)
 parser.add_argument("--head", default=12, type=int)
 parser.add_argument("--num-layers", default=7, type=int)
 parser.add_argument("--hidden", default=384, type=int)
@@ -52,6 +52,7 @@ args.benchmark = True if not args.off_benchmark else False
 args.gpus = torch.cuda.device_count()
 args.num_workers = 4*args.gpus if args.gpus else 8
 args.is_cls_token = True if not args.off_cls_token else False
+args.min_lr = args.lr/100
 if not args.gpus:
     args.precision=32
 
@@ -61,6 +62,17 @@ if args.mlp_hidden != args.hidden*4:
 train_ds, test_ds = get_dataset(args)
 train_dl = torch.utils.data.DataLoader(train_ds, batch_size=args.batch_size, shuffle=True, num_workers=args.num_workers, pin_memory=True)
 test_dl = torch.utils.data.DataLoader(test_ds, batch_size=args.eval_batch_size, num_workers=args.num_workers, pin_memory=True)
+
+class EarlyStoppingAtEpoch50Callback(pl.Callback):
+    def on_validation_end(self, trainer, pl_module):
+        # Check if the current epoch is 50 or more
+        if trainer.current_epoch >= 50:
+            # Get the validation accuracy from the logged metrics
+            val_acc = trainer.logged_metrics.get('val_acc')
+            # Check if validation accuracy is below 0.4
+            if val_acc is not None and val_acc < 0.4:
+                print(f"Stopping training at epoch {trainer.current_epoch} as validation accuracy is below 0.4")
+                trainer.should_stop = True
 
 class Net(pl.LightningModule):
     def __init__(self, hparams):
@@ -100,31 +112,25 @@ class Net(pl.LightningModule):
             out = self(img)
             loss = self.criterion(out, label)
 
-        if not self.log_image_flag and not self.hparams.dry_run:
-            self.log_image_flag = True
-            self._log_image(img.clone().detach().cpu())
-
         acc = torch.eq(out.argmax(-1), label).float().mean()
-        self.log("loss", loss)
-        self.log("acc", acc)
+        self.log("loss", loss, on_step=False, on_epoch=True)
+        self.log("acc", acc, on_step=False, on_epoch=True)
+        # Check if loss is NaN and exit if true
+        if torch.isnan(loss):
+            exit('NaN loss encountered in validation, stopping training.')
         return loss
 
     def training_epoch_end(self, outputs):
-        self.log("lr", self.optimizer.param_groups[0]["lr"], on_epoch=self.current_epoch)
+        self.log("lr", self.optimizer.param_groups[0]["lr"], on_step=False, on_epoch=True)
 
     def validation_step(self, batch, batch_idx):
         img, label = batch
         out = self(img)
         loss = self.criterion(out, label)
         acc = torch.eq(out.argmax(-1), label).float().mean()
-        self.log("val_loss", loss)
-        self.log("val_acc", acc)
+        self.log("val_loss", loss, on_step=False, on_epoch=True)
+        self.log("val_acc", acc, on_step=False, on_epoch=True)
         return loss
-
-    def _log_image(self, image):
-        grid = torchvision.utils.make_grid(image, nrow=4)
-        self.logger.experiment.log_image(grid.permute(1,2,0))
-        print("[INFO] LOG IMAGE!!!")
 
 
 if __name__ == "__main__":
@@ -147,7 +153,7 @@ if __name__ == "__main__":
         )
         refresh_rate = 1
     net = Net(args)
-    trainer = pl.Trainer(precision=args.precision,fast_dev_run=args.dry_run, gpus=args.gpus, benchmark=args.benchmark, logger=logger, max_epochs=args.max_epochs, weights_summary="full", progress_bar_refresh_rate=refresh_rate)
+    trainer = pl.Trainer(precision=args.precision,fast_dev_run=args.dry_run, gpus=args.gpus, benchmark=args.benchmark, logger=logger, max_epochs=args.max_epochs, weights_summary="full", progress_bar_refresh_rate=refresh_rate, callbacks=[EarlyStoppingAtEpoch50Callback()])
     trainer.fit(model=net, train_dataloader=train_dl, val_dataloaders=test_dl)
     if not args.dry_run:
         model_path = f"weights/{experiment_name}.pth"
